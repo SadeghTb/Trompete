@@ -1,0 +1,160 @@
+BOX_IMAGE = "ubuntu/xenial64"
+SETUP_MASTER = true
+SEC_MASTER = true
+SETUP_NODES = true
+NODE_COUNT = 2
+MASTER_IP = "192.168.0.10"
+SEC_MASTER_IP = "192.168.0.20"
+VIRTUAL_IP = "192.168.0.30"
+NODE_IP_NW = "192.168.0."
+#NODE_IP_NW = "192.168.122."
+POD_NW_CIDR = "10.244.0.0/16"
+#Generate new using steps in README
+KUBETOKEN = "b029ee.968a33e8d8e6bb0d"
+
+$resetkeepalived = <<RESETKEEPALIVED
+mv /tmp/keepalived.conf /etc/keepalived
+mv /tmp/check_apiserver.sh /etc/keepalived
+service keepalived restart
+RESETKEEPALIVED
+
+$installkeepalived = <<INSTALLKEEPALIVED
+mkdir /tmp/etcd
+chmod -R 777 /tmp/etcd
+apt update
+apt install keepalived -y
+INSTALLKEEPALIVED
+$kubemastersecond = <<SCRIPTSECONDMASTER
+mkdir /etc/kubernetes/pki
+mkdir /etc/kubernetes/pki/etcd
+mv /tmp/admin.conf /etc/kubernetes
+mv /tmp/ca.crt /etc/kubernetes/pki
+mv /tmp/ca.key /etc/kubernetes/pki
+mv /tmp/sa.key /etc/kubernetes/pki
+mv /tmp/sa.pub /etc/kubernetes/pki
+mv /tmp/front-proxy-ca.crt /etc/kubernetes/pki
+mv /tmp/front-proxy-ca.key /etc/kubernetes/pki
+mv /tmp/etcd/ca.crt /etc/kubernetes/pki/etcd
+mv /tmp/etcd/ca.key /etc/kubernetes/pki/etcd
+     
+#mv /tmp/etcd/etcd_encryption_config.yaml /etc/kubernetes/pki/etcd
+ip route delete 0.0.0.0/0 via 10.0.2.2 dev enp0s3 && ip route add 0.0.0.0/0 via 192.168.0.1 dev enp0s8
+kubeadm reset
+kubeadm join --token #{KUBETOKEN} #{VIRTUAL_IP}:6443 --discovery-token-unsafe-skip-ca-verification --control-plane --apiserver-advertise-address=#{SEC_MASTER_IP}
+
+
+SCRIPTSECONDMASTER
+
+$kubeminionscript = <<MINIONSCRIPT
+ip route delete 0.0.0.0/0 via 10.0.2.2 dev enp0s3 && ip route add 0.0.0.0/0 via 192.168.0.1 dev enp0s8
+kubeadm reset
+kubeadm join --token #{KUBETOKEN} #{VIRTUAL_IP}:6443 --discovery-token-unsafe-skip-ca-verification
+
+MINIONSCRIPT
+
+$kubemasterscript = <<SCRIPT
+apt-get install sshpass
+ip route delete 0.0.0.0/0 via 10.0.2.2 dev enp0s3 && ip route add 0.0.0.0/0 via 192.168.0.1 dev enp0s8
+kubeadm reset
+kubeadm init  --control-plane-endpoint=#{VIRTUAL_IP} --apiserver-advertise-address=#{MASTER_IP} --pod-network-cidr=#{POD_NW_CIDR} --token #{KUBETOKEN} --token-ttl 0
+#kubeadm init  --pod-network-cidr=#{POD_NW_CIDR} --token #{KUBETOKEN} --token-ttl 0
+mkdir -p $HOME/.kube
+sudo cp -Rf /etc/kubernetes/admin.conf $HOME/.kube/config
+#sudo cp -Rf /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+#sudo chown vagrant:vagrant /home/vagrant/.kube/config
+
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+for pkiFiles in ca.crt ca.key sa.key sa.pub front-proxy-ca.crt front-proxy-ca.key
+do
+	sshpass -p 'password' scp -o "StrictHostKeyChecking no" -qpr /etc/kubernetes/pki/${pkiFiles} ubuntu@192.168.0.25:/home/ubuntu/kubeadm-vagrant/Ubuntu
+done
+
+for etcdFiles in ca.crt ca.key
+do
+	sshpass -p 'password' scp -o "StrictHostKeyChecking no" -qpr /etc/kubernetes/pki/etcd/${etcdFiles} ubuntu@192.168.0.25:/home/ubuntu/kubeadm-vagrant/Ubuntu/etcd
+done
+sshpass -p 'password' scp -o "StrictHostKeyChecking no" -r /etc/kubernetes/admin.conf ubuntu@192.168.0.25:/home/ubuntu/kubeadm-vagrant/Ubuntu
+
+mv /tmp/helm.sh /home/vagrant
+chmod +x /home/vagrant/helm.sh
+sudo /home/vagrant/helm.sh
+
+
+SCRIPT
+
+Vagrant.configure("2") do |config|
+  config.vm.box = BOX_IMAGE
+  config.vm.box_check_update = false
+
+  config.vm.provider "virtualbox" do |l|
+    l.cpus = 2
+    l.memory = "2048"
+  end
+
+  config.vm.provision :shell, :path => "install-ubuntu.sh"
+
+  #config.hostmanager.enabled = true
+  #config.hostmanager.manage_guest = true
+  # config.vm.network "public_network"
+
+  if SETUP_MASTER
+    config.vm.define "master" do |subconfig|
+      subconfig.vm.hostname = "master"
+      subconfig.vm.network :public_network, ip: MASTER_IP
+      #subconfig.ssh.host = "192.168.26.10"
+      subconfig.vm.provider :virtualbox do |vb|
+        vb.customize ["modifyvm", :id, "--cpus", "2"]
+        vb.customize ["modifyvm", :id, "--memory", "2048"]
+      end
+      subconfig.vm.provision :shell, inline: $installkeepalived
+      subconfig.vm.provision "file", source: "keepalived.conf.master", destination: "/tmp/keepalived.conf"
+      subconfig.vm.provision "file", source: "check_apiserver.sh", destination: "/tmp/check_apiserver.sh"
+      subconfig.vm.provision "file", source: "nginx-pod.yaml", destination: "/tmp/nginx-pod.yaml"
+      subconfig.vm.provision "file", source: "helm.sh", destination: "/tmp/helm.sh"
+      subconfig.vm.provision :shell, inline: $resetkeepalived
+      subconfig.vm.provision :shell, inline: $kubemasterscript
+    end
+  end
+
+  if SEC_MASTER
+    config.vm.define "master2" do |subconfig|
+      subconfig.vm.hostname = "master2"
+      subconfig.vm.network :public_network, ip: SEC_MASTER_IP
+      subconfig.vm.provider :virtualbox do |vc|
+        vc.customize ["modifyvm", :id, "--cpus", "2"]
+        vc.customize ["modifyvm", :id, "--memory", "2048"]
+      end
+      subconfig.vm.provision :shell, inline: $installkeepalived
+      subconfig.vm.provision "file", source: "keepalived.conf.master2", destination: "/tmp/keepalived.conf"
+      subconfig.vm.provision "file", source: "check_apiserver.sh", destination: "/tmp/check_apiserver.sh"
+   #   subconfig.vm.provision "file", source: "/home/ubuntu/kubeadm-vagrant/Ubuntu/pki/", destination: "/tmp/"
+      subconfig.vm.provision "file", source: "ca.crt", destination: "/tmp/ca.crt"
+      subconfig.vm.provision "file", source: "ca.key", destination: "/tmp/ca.key"
+      subconfig.vm.provision "file", source: "sa.key", destination: "/tmp/sa.key"
+      subconfig.vm.provision "file", source: "sa.pub", destination: "/tmp/sa.pub"
+      subconfig.vm.provision "file", source: "front-proxy-ca.crt", destination: "/tmp/front-proxy-ca.crt"
+      subconfig.vm.provision "file", source: "front-proxy-ca.key", destination: "/tmp/front-proxy-ca.key"
+      subconfig.vm.provision "file", source: "etcd/ca.key", destination: "/tmp/etcd/ca.key"
+      subconfig.vm.provision "file", source: "etcd/ca.crt", destination: "/tmp/etcd/ca.crt"
+#      subconfig.vm.provision "file", source: "etcd/etcd_encryption_config.yaml", destination: "/tmp/etcd/etcd_encryption_config.yaml"
+      subconfig.vm.provision "file", source: "admin.conf", destination: "/tmp/admin.conf"
+      subconfig.vm.provision :shell, inline: $resetkeepalived
+      subconfig.vm.provision :shell, inline: $kubemastersecond
+
+    end
+  end
+
+  
+  if SETUP_NODES
+    (1..NODE_COUNT).each do |i|
+      config.vm.define "node#{i}" do |subconfig|
+        subconfig.vm.hostname = "node#{i}"
+        subconfig.vm.network :public_network, ip: NODE_IP_NW + "#{i + 50}"
+        subconfig.vm.provision :shell, inline: $kubeminionscript
+      end
+    end
+  end
+end
