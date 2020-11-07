@@ -450,5 +450,5 @@ Important Tips :
 1. describe your design choices :
 	We give each node an interface to communicate with each other and to access the internet. We use keepalived for HA purpose it will change Virtual ip if main master be unreachable. All of worker nodes and master nodes components talk to that virtual ip so when that ip switch from one master to another there will be no problem in connection.
 
-2. describe a solution for zero-downtime deployment with Kubernetes
+2. describe a solution for zero-downtime deployment with Kubernetes :
     We can use rolling updates for this purpose. it incrementally updating Pods instances with new ones and when all of users that works with old pods disconnected all of old pods will be replaced by new ones and new users will connect to our new version of application. We also can use A/B testing strategy to make sure our new pods are doing good by routing some percent of our traffic to these new pods. Then if everything gone fine then replace all old pods with new version. We can reach these purposes with Jenkins.
